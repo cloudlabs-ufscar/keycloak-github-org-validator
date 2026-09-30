@@ -10,13 +10,15 @@ import org.jboss.logging.Logger;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.Authenticator;
+import org.keycloak.authentication.authenticators.broker.AbstractIdpAuthenticator;
+import org.keycloak.authentication.authenticators.broker.util.PostBrokerLoginConstants;
+import org.keycloak.authentication.authenticators.broker.util.SerializedBrokeredIdentityContext;
 import org.keycloak.broker.provider.BrokeredIdentityContext;
 import org.keycloak.connections.httpclient.HttpClientProvider;
 import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
-import org.keycloak.models.utils.KeycloakModelUtils;
 
 import jakarta.ws.rs.core.Response;
 import java.io.IOException;
@@ -48,13 +50,27 @@ public class GitHubOrgAuthenticator implements Authenticator {
     @Override
     public void authenticate(AuthenticationFlowContext context) {
         logger.info("================================================================================");
-        logger.info("[GitHub-Org-Validator] Disparado no First Broker Login.");
+        logger.info("[GitHub-Org-Validator] Disparado no fluxo de autenticação.");
 
-        BrokeredIdentityContext brokerContext = (BrokeredIdentityContext) context.getAuthenticationSession()
-                .getAuthNote(KeycloakModelUtils.BROKERED_IDENTITY_CONTEXT);
+        // Recupera o contexto serializado do Identity Provider (First Broker Login ou Post Broker Login)
+        SerializedBrokeredIdentityContext serializedCtx = SerializedBrokeredIdentityContext
+                .readFromAuthenticationSession(context.getAuthenticationSession(), AbstractIdpAuthenticator.BROKERED_CONTEXT_NOTE);
 
-        if (brokerContext == null) {
+        if (serializedCtx == null) {
+            serializedCtx = SerializedBrokeredIdentityContext
+                    .readFromAuthenticationSession(context.getAuthenticationSession(), PostBrokerLoginConstants.PBL_BROKERED_IDENTITY_CONTEXT);
+        }
+
+        if (serializedCtx == null) {
             logger.warn("[GitHub-Org-Validator] BrokeredIdentityContext ausente na sessão. Ignorando validação.");
+            logger.info("================================================================================");
+            context.success();
+            return;
+        }
+
+        BrokeredIdentityContext brokerContext = serializedCtx.deserialize(context.getSession(), context.getAuthenticationSession());
+        if (brokerContext == null) {
+            logger.warn("[GitHub-Org-Validator] Não foi possível desserializar o BrokeredIdentityContext. Ignorando.");
             logger.info("================================================================================");
             context.success();
             return;
