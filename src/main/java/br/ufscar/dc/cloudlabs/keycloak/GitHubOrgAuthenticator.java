@@ -26,6 +26,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -52,7 +54,7 @@ public class GitHubOrgAuthenticator implements Authenticator {
         logger.info("================================================================================");
         logger.info("[GitHub-Org-Validator] Disparado no fluxo de autenticação.");
 
-        // Recupera o contexto serializado do Identity Provider (First Broker Login ou Post Broker Login)
+        // 1. Recupera o contexto serializado do Identity Provider
         SerializedBrokeredIdentityContext serializedCtx = SerializedBrokeredIdentityContext
                 .readFromAuthenticationSession(context.getAuthenticationSession(), AbstractIdpAuthenticator.BROKERED_CONTEXT_NOTE);
 
@@ -85,9 +87,16 @@ public class GitHubOrgAuthenticator implements Authenticator {
         }
 
         String githubUsername = brokerContext.getUsername();
-        String accessToken = brokerContext.getToken();
 
-        // 1. Carrega configurações do Authenticator
+        // 2. Extrai e limpa o token OAuth bruto
+        String rawToken = serializedCtx.getToken();
+        if (rawToken == null || rawToken.isBlank()) {
+            rawToken = brokerContext.getToken();
+        }
+
+        String accessToken = cleanAccessToken(rawToken);
+
+        // 3. Carrega configurações do Authenticator
         AuthenticatorConfigModel configModel = context.getAuthenticatorConfig();
         String allowedOrgsRaw = DEFAULT_ORGS;
         boolean requirePassword = DEFAULT_REQUIRE_PASSWORD;
@@ -110,7 +119,7 @@ public class GitHubOrgAuthenticator implements Authenticator {
         logger.infof("[GitHub-Org-Validator] Exigir senha local (UPDATE_PASSWORD): %b", requirePassword);
 
         if (accessToken == null || accessToken.isBlank()) {
-            logger.errorf("[GitHub-Org-Validator] ERRO: Token OAuth do GitHub ausente para @%s. Verifique o escopo 'read:org' no IdP.", githubUsername);
+            logger.errorf("[GitHub-Org-Validator] ERRO: Token OAuth do GitHub ausente para @%s.", githubUsername);
             logger.info("================================================================================");
             Response errorResponse = context.form()
                     .setError("Não foi possível obter o token de autorização do GitHub.")
@@ -119,7 +128,10 @@ public class GitHubOrgAuthenticator implements Authenticator {
             return;
         }
 
-        // 2. Valida membership
+        String tokenMask = accessToken.length() > 8 ? accessToken.substring(0, 8) + "..." : "***";
+        logger.infof("[GitHub-Org-Validator] Token limpo extraído com sucesso (prefixo: %s, tamanho: %d)", tokenMask, accessToken.length());
+
+        // 4. Valida membership
         boolean isAuthorized = checkUserOrganizations(context.getSession(), githubUsername, accessToken, allowedOrgs);
 
         if (!isAuthorized) {
@@ -133,13 +145,15 @@ public class GitHubOrgAuthenticator implements Authenticator {
             Response errorResponse = context.form()
                     .setError(errorMsg)
                     .createErrorPage(Response.Status.FORBIDDEN);
+            
+            // Aborta o fluxo com falha explícita de acesso negado
             context.failure(AuthenticationFlowError.ACCESS_DENIED, errorResponse);
             return;
         }
 
         logger.infof("[GitHub-Org-Validator] ✅ ACESSO APROVADO: Usuário @%s é membro autorizado!", githubUsername);
 
-        // 3. Força senha local se configurado
+        // 5. Força senha local se configurado
         if (requirePassword) {
             logger.infof("[GitHub-Org-Validator] 🔑 Injetando Required Action 'UPDATE_PASSWORD' para @%s.", githubUsername);
             context.getAuthenticationSession().addRequiredAction(UserModel.RequiredAction.UPDATE_PASSWORD);
@@ -147,6 +161,38 @@ public class GitHubOrgAuthenticator implements Authenticator {
 
         logger.info("================================================================================");
         context.success();
+    }
+
+    /**
+     * O Keycloak armazena a resposta bruta do OAuth (ex: {"access_token":"gho_xxx", ...} ou access_token=gho_xxx).
+     * Este método extrai a string pura do token para ser usada no header 'Authorization: Bearer <token>'.
+     */
+    private String cleanAccessToken(String rawToken) {
+        if (rawToken == null) {
+            return null;
+        }
+        rawToken = rawToken.trim();
+
+        // Se for JSON: {"access_token":"gho_...", ...}
+        if (rawToken.startsWith("{")) {
+            try {
+                JsonNode jsonNode = mapper.readTree(rawToken);
+                if (jsonNode.has("access_token")) {
+                    return jsonNode.get("access_token").asText();
+                }
+            } catch (Exception e) {
+                logger.debugf("Falha ao parsear token como JSON: %s", e.getMessage());
+            }
+        }
+
+        // Se for form-urlencoded: access_token=gho_...&scope=...
+        Matcher matcher = Pattern.compile("access_token=([^&]+)").matcher(rawToken);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+
+        // Se já for o token limpo
+        return rawToken;
     }
 
     /**
@@ -182,6 +228,8 @@ public class GitHubOrgAuthenticator implements Authenticator {
                     }
                 }
                 logger.infof("[GitHub-Org-Validator] Organizações públicas/visíveis do usuário encontradas: %s", foundOrgs);
+            } else {
+                logger.warnf("[GitHub-Org-Validator] Endpoint /user/orgs retornou status HTTP %d. Resposta: %s", statusCode, EntityUtils.toString(response.getEntity()));
             }
         } catch (Exception e) {
             logger.warnf(e, "[GitHub-Org-Validator] Falha ao consultar /user/orgs para @%s. Tentando endpoint individual...", username);
