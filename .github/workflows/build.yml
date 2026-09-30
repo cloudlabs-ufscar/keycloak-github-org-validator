@@ -3,10 +3,10 @@ name: Build & Release Keycloak SPI
 on:
   push:
     branches: [ "main" ]
-    tags: [ "v*" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -27,17 +27,11 @@ jobs:
       - name: Build with Maven
         run: mvn -B clean package --file pom.xml
 
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: keycloak-github-org-validator
-          path: target/keycloak-github-org-validator.jar
-          if-no-files-found: error
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish Release Asset
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v1.0.0
+          name: "Release v1.0.0"
           files: target/keycloak-github-org-validator.jar
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
